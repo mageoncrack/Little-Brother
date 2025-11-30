@@ -1,0 +1,6 @@
+{
+  "personality": "llama3.1:8b",
+  "coding": "qwen2.5-coder:7b",
+  "reasoning": "deepseek-r1:7b",
+  "visual": "qwen3-vl:4b"
+}
