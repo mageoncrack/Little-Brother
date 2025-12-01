@@ -37,11 +37,11 @@ ollama --version
 ## Adding or Changing Models
 - Update config/routing.json with new models:
 
-{
-  "personality": "llama2-7b",
-  "coding": "codegen-7b",
-  "reasoning": "llama2-7b"
-}
+  {
+    "personality": "llama3.1:8b",
+    "coding": "qwen2.5-coder:7b",
+    "reasoning": "deepseek-r1:7b"
+  }
 
 - Re-run python model_setup.py to ensure new models are installed.
 
