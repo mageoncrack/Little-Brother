@@ -8,6 +8,7 @@ import sys
 # --- Paths ---
 sessions_dir = Path("sessions")
 sessions_dir.mkdir(exist_ok=True)
+
 config_path = Path("config/routing.json")
 behavior_dir = Path("behavior_instruct")
 
@@ -22,32 +23,45 @@ def load_behavior(model_name):
         return file_path.read_text().strip() + "\n\n"
     return ""
 
-# --- Ollama CLI call ---
-def run_model(model_name, prompt, file_path=None):
+# --- Run model via Ollama (FIXED: uses STDIN so it doesn't freeze) ---
+def run_model(model_name, prompt):
     instructions = load_behavior(model_name)
     full_prompt = instructions + prompt
-    cmd = ["ollama", "run", model_name, "--prompt", full_prompt]
 
-    if file_path:
-        cmd += ["--file", str(file_path)]
+    process = subprocess.Popen(
+        ["ollama", "run", model_name],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",         # <--- FORCE UTF-8 on input/output
+        errors="replace"          # <--- prevent crashes on weird chars
+    )
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    stdout, stderr = process.communicate(full_prompt)
 
-    if result.stderr:
-        print(f"[Ollama error] {result.stderr.strip()}")
+    if stderr:
+        print(f"[Ollama error] {stderr.strip()}")
 
-    return result.stdout.strip()
+    return stdout.strip()
+
 
 # --- Generate session name ---
 def generate_session_name(initial_messages, personality_model):
-    context_text = "\n".join([f"{m['role']}: {m['content']}" for m in initial_messages])
+    context_text = "\n".join(
+        [f"{m['role']}: {m['content']}" for m in initial_messages]
+    )
     prompt = (
-        "Based on the following conversation, generate a short descriptive title "
-        "(3-5 words) without punctuation:\n" + context_text
+        "Generate a short descriptive title (3-5 words) without punctuation for this conversation:\n"
+        + context_text
     )
     raw_title = run_model(personality_model, prompt)
+
+    if not raw_title:
+        return "session_default"
+
     title = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_title)
-    return title[:50]
+    return title[:50] if title else "session_default"
 
 # --- Save messages ---
 def save_message(session_file, role, content):
@@ -62,58 +76,47 @@ def save_message(session_file, role, content):
     with open(session_file, "w") as f:
         json.dump(session_data, f, indent=2)
 
-# --- Load session ---
+# --- Load session file ---
 def load_session(file_path):
     with open(file_path) as f:
         return json.load(f)
 
-# --- Optional File Explorer ---
-def open_file_explorer():
-    sessions_path = sessions_dir.resolve()
-    if os.name == "nt":
-        subprocess.run(f'explorer "{sessions_path}"', shell=True)
-    elif os.name == "posix":
-        if sys.platform == "darwin":
+# --- Open session picker ---
+def choose_session():
+    choice = input("Load session list in File Explorer? (y/n): ").lower()
+    if choice == "y":
+        sessions_path = sessions_dir.resolve()
+        if os.name == "nt":
+            subprocess.run(f'explorer "{sessions_path}"', shell=True)
+        elif sys.platform == "darwin":
             subprocess.run(["open", str(sessions_path)])
         else:
             subprocess.run(["xdg-open", str(sessions_path)])
 
-# --- Choose old session ---
-def choose_session():
-    choice = input("Load session list in File Explorer? (y/n): ").lower()
-    if choice == "y":
-        open_file_explorer()
+    name = input("Write session name to load: ")
+    path = sessions_dir / f"{name}.json"
 
-    session_file = input("Write session name to load: ")
-    session_path = sessions_dir / f"{session_file}.json"
-
-    if not session_path.exists():
+    if not path.exists():
         print("Session not found! Try again.")
         return choose_session()
 
-    return session_path
+    return path
 
-# --- Route to helper models ---
+# --- Helper routing (coding + reasoning only, no visual) ---
 def route_to_helpers(user_input):
     helper_models = {
         "coding": routing.get("coding"),
-        "reasoning": routing.get("reasoning"),
-        "visual": routing.get("visual")
+        "reasoning": routing.get("reasoning")
     }
-
     outputs = {}
+
     for name, model in helper_models.items():
-        # Visual model only if image/video is mentioned
-        if name == "visual" and any(word in user_input.lower() for word in ["image", "photo", "video", "picture"]):
-            file_path = input("Enter path to image/video: ").strip()
-            outputs[name] = run_model(model, user_input, file_path=file_path)
-        else:
-            outputs[name] = run_model(model, user_input)
+        outputs[name] = run_model(model, user_input)
 
     return outputs
 
-# --- Personality model orchestrator ---
-def little_brother_response(session_file, user_input):
+# --- Personality model handles final answer ---
+def littlebrother_response(session_file, user_input):
     with open(session_file) as f:
         session_data = json.load(f)
 
@@ -123,23 +126,25 @@ def little_brother_response(session_file, user_input):
     for msg in session_messages:
         prompt_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
 
-    # Helper outputs
     helper_outputs = route_to_helpers(prompt_text)
-    helpers_text = "\n".join([f"[{k} model output]: {v}" for k, v in helper_outputs.items()])
+    helper_text = "\n".join([f"[{k} model output]: {v}" for k, v in helper_outputs.items()])
 
-    # Final prompt for personality model
-    personality_prompt = f"{prompt_text}\n{helpers_text}\nRespond to the user as yourself."
+    final_prompt = (
+        f"{prompt_text}\n{helper_text}\n"
+        f"Respond to the user as yourself."
+    )
 
-    return run_model(routing["personality"], personality_prompt)
+    response = run_model(routing["personality"], final_prompt)
+    return response
 
-# --- Main CLI ---
+# --- MAIN CLI ---
 if __name__ == "__main__":
     print("Little-Brother CLI is ready.\n")
-
     choice = input("1: Start new session\n2: Load old session\nChoose (1/2): ").strip()
 
     if choice == "1":
-        initial_msg = input("First message to Little-Brother: ")
+        # no "First message" prompt anymore
+        initial_msg = input("You: ")
         initial_messages = [{"role": "user", "content": initial_msg}]
         session_name = generate_session_name(initial_messages, routing["personality"])
         session_file = sessions_dir / f"{session_name}.json"
@@ -147,19 +152,17 @@ if __name__ == "__main__":
         for msg in initial_messages:
             save_message(session_file, msg["role"], msg["content"])
 
-        print(f"New session started with Little-Brother: {session_name}")
+        print(f"\nNew session started with Little-Brother: {session_name}\n")
 
     else:
         session_file = choose_session()
-        print(f"Loaded session: {session_file.stem}")
-
-    print("\nChat started with Little-Brother.\nClose the program anytime to end.\n")
+        session_data = load_session(session_file)
+        print(f"\nLoaded session: {session_file.stem}\n")
 
     while True:
         user_input = input("You: ")
-        response = little_brother_response(session_file, user_input)
-
-        print(f"Little-Brother: {response}")
+        response = littlebrother_response(session_file, user_input)
+        print(f"\nLittle-Brother: {response}\n")
 
         save_message(session_file, "user", user_input)
         save_message(session_file, "assistant", response)
